@@ -1,0 +1,6 @@
+# Python dependencies for Smart Mech
+# Note: Core runtime (backend/frontend) uses npm packages in backend/package.json and frontend/package.json.
+# This file is for Python tooling/training scripts.
+
+numpy>=1.26,<3.0
+scikit-learn>=1.4,<2.0
