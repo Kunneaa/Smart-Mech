@@ -66,6 +66,14 @@ class MongoQueryBuilder {
     return this;
   }
 
+  in(field, values) {
+    // MongoDB $in operator - filters for documents where field is in the values array
+    this.filter[field] = {
+      $in: values,
+    };
+    return this;
+  }
+
   update(data) {
     this.operation = 'update';
     this.payload = Array.isArray(data) ? data[0] : data;

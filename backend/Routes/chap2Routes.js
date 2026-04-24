@@ -3,6 +3,8 @@ const MachineCalculatorFactory = require('../MachineCalculator');
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 require('dotenv').config({ path: '../config.env' });
+const { spawn } = require('child_process');
+const path = require('path');
 
 const Chapter2Routes = express.Router();
 const Chapter2Function = MachineCalculatorFactory.getChapter('Chapter2');
@@ -30,12 +32,57 @@ function buildChapter2Payload(chapter2Data) {
   };
 }
 
+function getMonitorRecommendation(cong_suat, van_toc, he_so) {
+  return new Promise((resolve, reject) => {
+    const pythonScript = path.join(__dirname, '../../ml/predict.py');
+    const process = spawn('python', [pythonScript, cong_suat, van_toc, he_so]);
+    
+    let result = '';
+    let errorOutput = '';
+
+    process.stdout.on('data', (data) => {
+      result += data.toString();
+    });
+
+    process.stderr.on('data', (data) => {
+      errorOutput += data.toString();
+    });
+
+    process.on('close', (code) => {
+      if (code === 0) {
+        try {
+          const jsonResult = JSON.parse(result);
+          if (jsonResult.error) reject(new Error(jsonResult.error));
+          else resolve(jsonResult.ids);
+        } catch (e) {
+          reject(new Error('Lỗi parse JSON từ Python: ' + result));
+        }
+      } else {
+        reject(new Error(`Python process exited with code ${code}: ` + errorOutput));
+      }
+    });
+  });
+}
+
 async function fetchSingleRow(db, tableName, filterField, filterValue, columns = '*') {
   const { data, error } = await db.from(tableName).select(columns).eq(filterField, filterValue);
   return {
     data: data && data.length > 0 ? data[0] : null,
     error,
   };
+}
+
+async function fetchRowsByIds(mongoDb, collectionName, ids) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return [];
+  }
+
+  const rows = await mongoDb
+    .collection(collectionName)
+    .find({ id: { $in: ids } })
+    .toArray();
+
+  return ids.map((id) => rows.find((row) => row.id === id)).filter(Boolean);
 }
 
 Chapter2Routes.post('/chapter2/:userid/:recordid?', async (request, response) => {
@@ -50,18 +97,23 @@ Chapter2Routes.post('/chapter2/:userid/:recordid?', async (request, response) =>
 
     const inputChapter2Data = Chapter2FirstCalculation(request.body);
 
-    const { data: monitorData, error } = await db
-      .from('Monitor')
-      .select('*')
-      .gte('cong_suat', inputChapter2Data.cong_suat_can_thiet_tren_truc_dong_co)
-      .gte('van_toc_vong_quay', inputChapter2Data.so_vong_quay_so_bo);
-
-    if (error) {
-      console.error(error);
-      return response.status(400).json({ message: error.message });
+    // Gọi Python Model (Machine Learning KNN)
+    const he_so_mac_dinh = 0.85; // Có thể tinh chỉnh sau
+    let monitorIds = [];
+    try {
+      monitorIds = await getMonitorRecommendation(
+        inputChapter2Data.cong_suat_can_thiet_tren_truc_dong_co,
+        inputChapter2Data.so_vong_quay_so_bo,
+        he_so_mac_dinh
+      );
+    } catch (mlError) {
+      return response.status(500).json({ message: 'Lỗi gọi mô hình AI đề xuất động cơ', error: mlError.message });
     }
 
-    const monitorList = MonitorSelect(monitorData);
+    const monitorData = await fetchRowsByIds(request.mongoDb, 'Monitor', monitorIds);
+
+    // Sắp xếp lại danh sách Monitor theo đúng thứ tự model trả về (vì in query không đảm bảo thứ tự)
+    const monitorList = monitorIds.map(id => monitorData.find(m => m.id === id)).filter(Boolean);
 
     if (recordid) {
       const recordToken = getTokenId(recordid, process.env.SECRET_KEY, HISTORY_TOKEN_ERROR);
@@ -109,7 +161,6 @@ Chapter2Routes.post('/chapter2/:userid/:recordid?', async (request, response) =>
       .insert([newChapter2]);
 
     if (insertChapterError) {
-      console.error('Insert Chapter2 Error:', insertChapterError);
       return response.status(400).json({ message: insertChapterError.message });
     }
 
@@ -174,17 +225,23 @@ Chapter2Routes.get('/chapter2/:recordid', async (request, response) => {
     }
 
     const chapter2 = chapter2data[0];
-    const { data: monitorData, error: monitorDataError } = await db
-      .from('Monitor')
-      .select('*')
-      .gte('cong_suat', chapter2.cong_suat_can_thiet_tren_truc_dong_co)
-      .gte('van_toc_vong_quay', chapter2.so_vong_quay_so_bo);
-
-    if (monitorDataError) {
-      return response.status(400).json({ message: monitorDataError.message });
+    
+    // Gọi Python Model
+    const he_so_mac_dinh = 0.85;
+    let monitorIds = [];
+    try {
+      monitorIds = await getMonitorRecommendation(
+        chapter2.cong_suat_can_thiet_tren_truc_dong_co,
+        chapter2.so_vong_quay_so_bo,
+        he_so_mac_dinh
+      );
+    } catch (mlError) {
+      return response.status(500).json({ message: 'Lỗi gọi mô hình AI', error: mlError.message });
     }
 
-    const monitorList = MonitorSelect(monitorData || []);
+    const monitorData = await fetchRowsByIds(request.mongoDb, 'Monitor', monitorIds);
+
+    const monitorList = monitorIds.map(id => monitorData.find(m => m.id === id)).filter(Boolean);
 
     return response.status(200).json({
       message: 'Đã lấy dữ liệu chương 2 thành công',
@@ -216,7 +273,6 @@ const updateMonitorSelection = async (request, response) => {
     const { data: recordData, error: recordDataError } = await db.from('HistoryRecord').select('*').eq('id', recordToken.id);
 
     if (recordDataError) {
-      console.error("recordDataError", recordDataError)
       return response.status(400).json({ message: recordDataError.message });
     }
 
@@ -227,7 +283,6 @@ const updateMonitorSelection = async (request, response) => {
     const { data: monitorData, error: monitorDataError } = await db.from('Monitor').select('*').eq('id', selectedMonitorId);
     
     if (monitorDataError) {
-      console.error("monitorDataError", monitorDataError)
       return response.status(400).json({ message: monitorDataError.message });
     }
 
@@ -238,7 +293,6 @@ const updateMonitorSelection = async (request, response) => {
     const { data: chapter2data, error: chapter2DataError } = await db.from('Chapter2').select('*').eq('id', recordData[0].chapter2_id);
 
     if(chapter2DataError) {
-      console.error("chapter2DataError", chapter2DataError)
       return response.status(400).json({ message: chapter2DataError.message });
     }
 
@@ -253,7 +307,6 @@ const updateMonitorSelection = async (request, response) => {
     const { error: updataDataError } = await db.from('Chapter2').update(updateChapter2Data).eq('id', recordData[0].chapter2_id);
 
     if(updataDataError) {
-      console.error("updataDataError", updataDataError)
       return response.status(400).json({ message: updataDataError.message });
     }
 
@@ -263,7 +316,6 @@ const updateMonitorSelection = async (request, response) => {
       .eq('id', recordToken.id);
 
     if(updateMonitorIdError) {
-      console.error("updateMonitorIdError", updateMonitorIdError)
       return response.status(400).json({ message: updateMonitorIdError.message });
     }
     return response.status(200).json({ message: 'Đã tính toán và cập nhật thành công chương 2' });
@@ -325,16 +377,6 @@ function Chapter2FirstCalculation(input) {
     so_vong_quay_truc_cong_tac,
     so_vong_quay_so_bo,
   };
-}
-
-function MonitorSelect(monitorData) {
-  const monitors = [...monitorData].sort((a, b) => {
-    if (a.cong_suat === b.cong_suat) {
-      return a.van_toc_vong_quay - b.van_toc_vong_quay;
-    }
-    return a.cong_suat - b.cong_suat;
-  });
-  return monitors.slice(0, 3);
 }
 
 function Chapter2SecondCalculation(Chapter2Input, MonitorInput) {
