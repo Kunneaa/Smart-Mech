@@ -113,7 +113,14 @@ Chapter2Routes.post('/chapter2/:userid/:recordid?', async (request, response) =>
     const monitorData = await fetchRowsByIds(request.mongoDb, 'Monitor', monitorIds);
 
     // Sắp xếp lại danh sách Monitor theo đúng thứ tự model trả về (vì in query không đảm bảo thứ tự)
-    const monitorList = monitorIds.map(id => monitorData.find(m => m.id === id)).filter(Boolean);
+  const monitorList = monitorIds.map((id, index) => {
+    const monitor = monitorData.find(m => m.id === id);
+    return {
+      ...monitor,
+      rank: index + 1,  // rank 1, 2, 3
+      isMostSuggested: index === 0  // true chỉ cho top 1
+    };
+  }).filter(Boolean);
 
     if (recordid) {
       const recordToken = getTokenId(recordid, process.env.SECRET_KEY, HISTORY_TOKEN_ERROR);
@@ -241,7 +248,14 @@ Chapter2Routes.get('/chapter2/:recordid', async (request, response) => {
 
     const monitorData = await fetchRowsByIds(request.mongoDb, 'Monitor', monitorIds);
 
-    const monitorList = monitorIds.map(id => monitorData.find(m => m.id === id)).filter(Boolean);
+    const monitorList = monitorIds.map((id, index) => {
+      const monitor = monitorData.find(m => m.id === id);
+      return {
+        ...monitor,
+        rank: index + 1,
+        isMostSuggested: index === 0
+      };
+    }).filter(Boolean);
 
     return response.status(200).json({
       message: 'Đã lấy dữ liệu chương 2 thành công',
